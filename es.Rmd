@@ -1,0 +1,407 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+################# FUSION DATA MULTIPLE ###############################
+
+# 1) Lecture des fichiers
+new_train = read.csv("new_house_transactions.csv")
+new_nearby = read.csv("new_house_transactions_nearby_sectors.csv")
+pre_owned = read.csv("pre_owned_house_transactions.csv")
+pre_nearby = read.csv("pre_owned_house_transactions_nearby_sectors.csv")
+month_only = read.csv("city_search_index.csv")
+sector_only = read.csv("sector_POI.csv")
+
+library(dplyr)
+month_only_clean = month_only %>%
+  group_by(month) %>%
+  summarise(across(everything(), mean, na.rm = TRUE))
+
+
+# 2) Vérifier les colonnes
+colnames(new_train)
+colnames(new_nearby)
+colnames(pre_owned)
+colnames(pre_nearby)
+colnames(month_only)
+colnames(sector_only)
+
+# 3) Transforme 0 en NA si nécessaire
+train[train == 0] = NA
+nearby[nearby == 0] = NA
+pre_owned[pre_owned == 0] = NA
+pre_nearby[pre_nearby == 0] = NA
+month_only_clean[month_only_clean == 0] = NA
+sector_only[sector_only == 0] = NA
+
+# 4) Fusion par month et sector
+full_data = merge(new_train, new_nearby, by = c("month", "sector"), all.x = TRUE)
+full_data = merge(full_data, pre_owned, by = c("month", "sector"), all.x = TRUE)
+full_data = merge(full_data, pre_nearby, by = c("month", "sector"), all.x = TRUE)
+full_data = merge(full_data, sector_only, by = "sector", all.x = TRUE)
+full_data = merge(full_data, month_only_clean, by = "month", all.x = TRUE)
+
+full_data = merge(full_data, land_clean, by = c("month", "sector"), all.x = TRUE)
+pr
+
+write.csv(full_data, "Housing_China.csv", row.names = FALSE)
+
+
+# 5) Vérification de dimension et aperçu
+dim(pre_nearby)
+dim(pre_owned)
+dim(month_only_clean)
+dim(sector_only)
+dim(full_data)
+head(full_data)
+
+
+
+
+############ Nettoyage de Housing_china.csv ############
+
+# Chargement de fichier CSV
+dat = read.csv("Housing_China.csv")
+
+# Aperçu des données
+dim(dat)
+
+head(dat)
+
+summary(dat)
+
+# 1) Transformer toutes les valeurs 0 en NA dans tout le dataset
+dat[dat == 0] = NA
+
+# Vérifier combien de valeurs manquantes par colonne
+na_count = colSums(is.na(dat))
+print(na_count)
+
+# Calcule du pourcentage de NA par colonne
+na_percent = (na_count / nrow(dat)) * 100
+print(na_percent)
+
+# Supprime les colonnes avec plus de 70% de NA
+dat = dat[, na_percent < 70]
+dim(dat)
+# Remplace les NA restants par la moyenne 
+for (col in names(dat)) {
+  if (is.numeric(dat[[col]])) {
+    dat[[col]][is.na(dat[[col]])] = mean(dat[[col]], na.rm = TRUE)
+  }
+}
+
+
+################### Analyse descriptive et selection des variable ##################
+
+######### Pour "new_house_transactions_nearby_sectors.csv" ##########
+
+#colnames(new_nearby)
+#cols_to_keep = c("amount_new_house_transactions", colnames(new_nearby))
+#dat_new_nearby = dat[, cols_to_keep, drop = FALSE]
+
+
+
+####### INFO UTILE : Une colonne est quasi-constante (NZV) si : freqRatio > 19  ET percentUnique < 0.1
+
+
+######### 1) Vérifier les colonnes non informatives #######
+# Charger caret pour les NZV
+if(!require(caret)) install.packages("caret")
+library(caret)
+
+# ---------------------------
+# 1) Colonnes near-zero variance
+# ---------------------------
+nzv_info = nearZeroVar(dat, saveMetrics = TRUE)
+nzv_cols = rownames(nzv_info[nzv_info$nzv == TRUE, ])
+
+cat("Colonnes near-zero variance :", length(nzv_cols), "\n")
+print(nzv_cols)
+
+print(dat$leisure_entertainment_stores_dense)
+
+# ---------------------------
+# 2) Liste complète des colonnes à examiner
+# ---------------------------
+cols_to_inspect = nzv_cols
+cat("Total colonnes à examiner :", length(cols_to_inspect), "\n")
+print(cols_to_inspect)
+
+# ---------------------------
+# 3) Optionnel : supprimer ces colonnes automatiquement
+# ---------------------------
+dat = dat[, !(colnames(dat) %in% cols_to_inspect)]
+
+
+
+######### 2) Vérifier les colonnes non informatives #######
+
+# 1) Sélectionner uniquement les colonnes numériques
+numeric_cols = sapply(dat, is.numeric)
+dat_numeric = dat[, numeric_cols]
+
+# 2) Calculer la matrice de corrélation
+cor_mat = cor(dat_numeric, use = "pairwise.complete.obs")
+
+# 3) Identifier les paires très corrélées
+cor_threshold = 0.9
+high_cor_idx = which(abs(cor_mat) > cor_threshold & abs(cor_mat) < 1, arr.ind = TRUE)
+
+# 4) Créer un tableau propre des paires fortement corrélées
+high_cor_pairs = data.frame(
+  var1 = rownames(cor_mat)[high_cor_idx[, 1]],
+  var2 = colnames(cor_mat)[high_cor_idx[, 2]],
+  correlation = cor_mat[high_cor_idx]
+)
+
+# Retirer les doublons (ex : A–B et B–A)
+high_cor_pairs = high_cor_pairs[high_cor_pairs$var1 < high_cor_pairs$var2, ]
+
+print(high_cor_pairs)
+
+
+
+
+if (!require(randomForest)) install.packages("randomForest")
+library(randomForest)
+
+# Nom de la variable cible
+target = "amount_new_house_transactions"   # correction orthographe + cohérence
+
+# Vecteur où on stockera les variables à supprimer
+vars_to_remove = c()
+
+# Boucle sur toutes les paires de variables fortement corrélées
+for (i in 1:nrow(high_cor_pairs)) {
+  
+  v1 = high_cor_pairs$var1[i]
+  v2 = high_cor_pairs$var2[i]
+  
+  # Vérification que les colonnes existent
+  if (!(v1 %in% colnames(dat)) || !(v2 %in% colnames(dat))) {
+    cat("⚠️  Colonnes manquantes :", v1, v2, "\n")
+    next
+  }
+  
+  # Construire le sous-jeu de données contenant la cible + les deux variables corrélées
+  data_sub = dat[, c(target, v1, v2)]
+  data_sub = na.omit(data_sub)
+  
+  # Modèle Random Forest pour comparer l’importance des deux variables
+  rf_model = randomForest(
+    as.formula(paste(target, "~", v1, "+", v2)),
+    data = data_sub,
+    importance = TRUE
+  )
+  
+  # Extraire l'importance des variables
+  imp = importance(rf_model)
+  
+  # Déterminer quelle variable est la plus importante
+  var_keep = rownames(imp)[which.max(imp[, 1])]
+  var_drop = rownames(imp)[which.min(imp[, 1])]
+  
+  cat("\n----------------------------------------\n")
+  cat("Variables testées :", v1, "vs", v2, "\n")
+  cat("→ Importance :", imp[, 1], "\n")
+  cat("→ Garder :", var_keep, "\n")
+  cat("→ Supprimer :", var_drop, "\n")
+  
+  # Ajouter à la liste des variables à supprimer
+  vars_to_remove = c(vars_to_remove, var_drop)
+}
+
+vars_to_remove = unique(vars_to_remove)
+print(vars_to_remove)
+
+dat = dat[, !(colnames(dat) %in% vars_to_remove)]
+
+
+############### Epuration avec LASSO ###########
+
+# 1️⃣ Installer et charger le package glmnet
+if (!require(glmnet)) install.packages("glmnet")
+library(glmnet)
+
+# 2️⃣ Préparer les données
+# Sélectionner uniquement les colonnes numériques (sauf la cible)
+num_cols = sapply(dat, is.numeric)
+x_data = dat[, num_cols]
+y_data = x_data$amount_new_house_transactions
+x_data$amount_new_house_transactions = NULL  # enlever la cible des prédicteurs
+
+# Convertir en matrice (glmnet nécessite une matrice)
+x_matrix = as.matrix(x_data)
+y_vector = as.vector(y_data)
+
+# 3️⃣ Ajuster un LASSO
+set.seed(123)  # reproductibilité
+lasso_model = cv.glmnet(
+  x = x_matrix,
+  y = y_vector,
+  alpha = 1,        # alpha = 1 -> LASSO
+  nfolds = 5        # validation croisée 5 folds
+)
+
+# 4️⃣ Afficher le lambda optimal
+cat("Lambda optimal (min):", lasso_model$lambda.min, "\n")
+cat("Lambda 1se:", lasso_model$lambda.1se, "\n")
+
+# 5️⃣ Extraire les coefficients au lambda optimal
+coef_lasso = coef(lasso_model, s = "lambda.min")
+print(coef_lasso)
+
+# 6️⃣ Identifier les variables conservées par le LASSO
+vars_selected = rownames(coef_lasso)[which(coef_lasso != 0)]
+vars_selected = vars_selected[vars_selected != "(Intercept)"]  # enlever l'intercept
+cat("Variables conservées par le LASSO:\n")
+print(vars_selected)
+
+# 7️⃣ Optionnel : créer un dataset final avec uniquement ces variables
+dat = dat[, c("amount_new_house_transactions", vars_selected)]
+
+housing = read.csv("Housing_China.csv")
+# Sélectionner seulement month et sector_id dans le dataset initial
+id_cols = housing[, c("sector", "month")]
+
+# Ajouter ces colonnes au dataset nettoyé
+dat = cbind(id_cols, dat)
+
+
+######################## PREPARTION POUR LE MODELE DE SERIE TEMPORELLE #####################
+
+# Ajout de jour "01-" devant le texte
+dat$month = as.Date(paste0("01-", dat$month), format="%d-%Y-%b")
+
+# Trie des données par secteur et date
+dat = dat[order(dat$sector, dat$month), ]
+
+# Crée vars_selected : toutes les colonnes sauf la cible, sector et month
+vars_selected = setdiff(colnames(dat), c("amount_new_house_transactions", "sector", "month"))
+
+# Vérification
+length(vars_selected)   # nombre de variables explicatives
+head(vars_selected)     # premiers noms pour contrôle
+
+#Créer un tableau final pour le modèle
+vars_final = c("sector", "month", "amount_new_house_transactions", vars_selected)
+ts_data = dat[, vars_final]
+
+dim(ts_data)
+head(ts_data)
+
+# 5️⃣ Normalisation des variables explicatives (0-1)
+features = vars_selected  # toutes les variables explicatives
+ts_data[, features] = lapply(ts_data[, features], function(x) {
+  (x - min(x)) / (max(x) - min(x))
+})
+
+
+######################### LSTM - MODELE DE SERIE TEMPORELLE ########################
+library(keras)
+library(abind)
+
+# ---------------------------
+# Paramètres
+# ---------------------------
+lag_steps = 3  # nombre de mois précédents pour prédire le suivant
+
+# ---------------------------
+# Création des séquences X/Y
+# ---------------------------
+X_list = list()
+Y_list = list()
+
+for(sector in unique(ts_data$sector)) {
+  sector_data = ts_data[ts_data$sector == sector, ]
+  
+  # Ignorer les secteurs trop petits
+  if(nrow(sector_data) <= lag_steps) next
+  
+  sector_features = as.matrix(sector_data[, features])
+  sector_target = sector_data$amount_new_house_transactions
+  
+  for(t in (lag_steps + 1):nrow(sector_data)) {
+    X_list[[length(X_list) + 1]] = sector_features[(t - lag_steps):(t - 1), ]
+    Y_list[[length(Y_list) + 1]] = sector_target[t]
+  }
+}
+
+# Conversion en array 3D : samples x lag x features
+X_array = abind::abind(X_list, along = 3)
+X_array = aperm(X_array, c(3, 1, 2))
+Y_array = unlist(Y_list)
+
+cat("Dimensions X_array :", dim(X_array), "\n")
+cat("Length Y_array :", length(Y_array), "\n")
+
+# ---------------------------
+# Split train/test
+# ---------------------------
+set.seed(123)
+n_samples = dim(X_array)[1]
+train_idx = 1:round(0.8 * n_samples)
+test_idx = (round(0.8 * n_samples) + 1):n_samples
+
+X_train = X_array[train_idx,,]
+Y_train = Y_array[train_idx]
+
+X_test = X_array[test_idx,,]
+Y_test = Y_array[test_idx]
+
+# ---------------------------
+# Définition du modèle LSTM
+# ---------------------------
+model = keras_model_sequential() %>%
+  layer_lstm(units = 50, input_shape = c(lag_steps, length(features))) %>%
+  layer_dense(units = 1)
+
+model %>% compile(
+  loss = "mse",
+  optimizer = "adam"
+)
+
+# ---------------------------
+# Normalisation min-max pour la cible
+# ---------------------------
+Y_min = min(Y_train)
+Y_max = max(Y_train)
+Y_train_scaled = (Y_train - Y_min) / (Y_max - Y_min)
+Y_test_scaled = (Y_test - Y_min) / (Y_max - Y_min)
+
+# ---------------------------
+# Entraînement du modèle sur la cible normalisée
+# ---------------------------
+history = model %>% fit(
+  x = X_train,
+  y = Y_train_scaled,   # utilisation de Y_train_scaled
+  epochs = 30,
+  batch_size = 32,
+  validation_split = 0.2
+)
+
+# ---------------------------
+# Prédiction et remise à l'échelle
+# ---------------------------
+pred_scaled = model %>% predict(X_test)
+pred = pred_scaled * (Y_max - Y_min) + Y_min  # retransforme dans l'échelle originale
+
+# Calcul du MSE
+mse = mean((pred - Y_test)^2)
+cat("MSE sur test set :", mse, "\n")
+
+rmse = sqrt(mse)
+cat("RMSE :", rmse, "\n")
+
+mape = mean(abs((pred - Y_test)/Y_test)) * 100
+cat("MAPE (%) :", mape, "\n")
+
+rmse = sqrt(mean((pred - Y_test)^2))
+rmse_pct = rmse / mean(Y_test) * 100
+cat("RMSE (%) :", rmse_pct, "\n")
+
+r2 = 1 - sum((Y_test - pred)^2) / sum((Y_test - mean(Y_test))^2)
+cat("R² :", r2, "\n")
